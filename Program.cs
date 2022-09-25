@@ -5,12 +5,12 @@ using Newtonsoft.Json;
 namespace GuidChanger; 
 
 public static class Program {
+    static readonly Stopwatch Time = new();
     static Database _database;
     static int _xd;
-    static Stopwatch _time = new();
     
     public static async Task Main() {
-        _time.Start();
+        Time.Start();
         AppDomain.CurrentDomain.UnhandledException += ExceptionHandler;
         
         Console.WriteLine("Enter path to db.json: ");
@@ -20,12 +20,13 @@ public static class Program {
         Console.WriteLine("Enter path to the project: ");
         string project = Console.ReadLine()!;
         if (!Directory.Exists(project)) throw new DirectoryNotFoundException();
+
         
         Deserialize(db);
         await ReadProject(project);
         
-        _time.Stop();
-        TimeSpan elapsed = _time.Elapsed;
+        Time.Stop();
+        TimeSpan elapsed = Time.Elapsed;
         
         Console.WriteLine($"Finished in {elapsed.Minutes}:{elapsed.Seconds}; {_xd} guids found");
         Console.ReadLine();
@@ -36,54 +37,60 @@ public static class Program {
     }
 
     static async Task ReadProject(string path) {
-        List<string> directories = Directory.GetDirectories(path, "*", SearchOption.AllDirectories).ToList();
-        /*List<string> files = directories.SelectMany(d => Directory.GetFiles(d, "*.*", SearchOption.AllDirectories))
-            .ToList();*/
+        List<string> projectDirectories = Directory
+            .GetDirectories(path, "*", SearchOption.AllDirectories).ToList();
         
+        List<string> assetBundlesDirectories = Directory
+            .GetDirectories(Path.Combine(path, "Asset_Bundles"), "*", SearchOption.AllDirectories).ToList();
+        
+        List<string> files = projectDirectories
+            .SelectMany(d => Directory.GetFiles(d, "*.*", SearchOption.AllDirectories)).ToList();
 
-        foreach (string directory in directories.Where(directory => !directory.EndsWith("tanks") && 
-                                                                    !directory.EndsWith("tank") && 
-                                                                    !directory.EndsWith("clientresources") && 
-                                                                    !directory.EndsWith("content") &&
-                                                                    !directory.EndsWith("weapon") &&
-                                                                    !directory.EndsWith("hull"))) {
-            Console.WriteLine(directory);
+        await Parallel.ForEachAsync(assetBundlesDirectories.Where(dir => !dir.EndsWith("tanks") && 
+                                                              !dir.EndsWith("tank") && 
+                                                              !dir.EndsWith("clientresources") && 
+                                                              !dir.EndsWith("content") &&
+                                                              !dir.EndsWith("weapon") &&
+                                                              !dir.EndsWith("hull")), async (directory, dirCancel) => {
+            
             Bundle bundle = _database.Bundles.FirstOrDefault(b => directory.EndsWith(b.BundleName));
-            if (bundle.Equals(default(Bundle))) continue;
+            if (bundle.Equals(default(Bundle))) return;
 
-            foreach (string file in Directory.GetFiles(directory, "*.*", SearchOption.AllDirectories)) {
-                Console.WriteLine(file);
-                if (!Path.GetExtension(file).EndsWith("meta")) continue;
-
-                Asset asset =
-                    bundle.Assets.FirstOrDefault(a => Path.GetFileName(a.ObjectName) == Path.GetFileNameWithoutExtension(file));
-                if (asset.Equals(default(Asset))) continue;
-                
-                string[] fileContent = await File.ReadAllLinesAsync(file);
-
-                for (byte i = 0; i < fileContent.Length; i++) {
-                    string str = fileContent[i];
-
-                    if (!str.Trim().StartsWith("guid")) continue;
+            await Parallel.ForEachAsync(Directory.GetFiles(directory, "*.*", SearchOption.AllDirectories), dirCancel,
+                async (file, fileCancel) => {
                     
-                    Console.WriteLine($"Old {str}\nNew guid: {asset.Guid}");
-                    str = $"guid: {asset.Guid}";
-                    fileContent[i] = str;
-                    _xd++;
-                    break;
-                }
+                    Console.WriteLine(file);
+                    if (!Path.GetExtension(file).EndsWith("meta")) return;
 
-                // DO NOT TOUCH THIS IN TESTING PHASE
-                //File.WriteAllLines(file, fileContent);
-            }
-        }
+                    Asset asset =
+                        bundle.Assets.FirstOrDefault(a => Path.GetFileName(a.ObjectName) == Path.GetFileNameWithoutExtension(file));
+                    if (asset.Equals(default(Asset))) return;
+                
+                    string[] fileContent = await File.ReadAllLinesAsync(file, fileCancel);
+
+                    Parallel.For(0, fileContent.Length, (i, state) => {
+                        string str = fileContent[i];
+
+                        if (!str.Trim().StartsWith("guid")) return;
+                    
+                        Console.WriteLine($"Old {str}\nNew guid: {asset.Guid}");
+                        str = $"guid: {asset.Guid}";
+                        fileContent[i] = str;
+                        _xd++;
+                        state.Break();
+                    });
+
+                    // DO NOT TOUCH THIS IN TESTING PHASE
+                    //File.WriteAllLines(file, fileContent);
+                });
+        });
     }
     
     static void ExceptionHandler(object? sender, UnhandledExceptionEventArgs e) {
         Exception exception = (Exception)e.ExceptionObject;
         
         Console.WriteLine($"{exception.Message} {Environment.NewLine}" +
-                          $"Press any key to continue...");
+                          "Press any key to continue...");
         
         Console.ReadLine();
         Environment.Exit(exception.HResult);
